@@ -5,4 +5,4 @@ PredictMadness.pdf: the presentation of this project
 
 Predict_madness.html: the R Markdown file
 
-Predict_Madness.Rmd: orginal 
+Predict_Madness.Rmd: orginal code
