@@ -1,0 +1,872 @@
+---
+title: Predicting the Madness!!
+author: Harvir Singh Virk, Yu Zhong, Yi-Cheng Lu
+date: "12/6/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: lumen
+    highlight: pygments
+---
+
+
+
+##### import library
+```{r}
+library(dplyr)
+library(data.table)
+library(caret)
+library(leaps)
+library(glmnet)
+library(tree)  
+library(stats)
+library(factoextra)
+library(randomForest)
+library(gbm)
+library(plyr)
+library(car)
+library(ggcorrplot)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+
+```
+
+
+
+## Question 1: How do teams win?
+
+### Step 1: Data cleaning
+```{r}
+seasonstats  <-read.csv("march-machine-learning-mania-2016-v2/RegularSeasonDetailedResults.csv")
+tourneystats <-read.csv("march-machine-learning-mania-2016-v2/TourneyDetailedResults.csv")
+tourneyseeds <-read.csv("march-machine-learning-mania-2016-v2/TourneySeeds.csv")
+```
+Converting column values
+
+Based on the columns below. They have been translated to factors and confirmed to be factors.
+
+```{r}
+columnfactors = c("Season", "Daynum", "Wteam", "Lteam")
+seasonstats[,columnfactors] = lapply(seasonstats[,columnfactors], factor)
+seasonstats$Wloc = as.factor(seasonstats$Wloc)
+sapply(seasonstats, class)
+
+tourneystats[,columnfactors] = lapply(tourneystats[,columnfactors], factor)
+tourneystats$Wloc = as.factor(tourneystats$Wloc)
+sapply(tourneystats, class)
+```
+Why -- As of now, each 'row' represents a game. However, in order for us to judge who will win, we need each row to represent a team. So we need to double up the 'rows' so each row can represent the team. In our mind, the best approach was to create 2 dataframes, and then put them back together based on the winning or losing team representing the row. 
+
+```{r}
+seasonstats.w = data.frame(seasonstats)
+seasonstats.l = data.frame(seasonstats)
+
+tourneystats.w = data.frame(tourneystats)
+tourneystats.l = data.frame(tourneystats)
+```
+Now we are going to review column names for both new data frames and change them. We don't really want a 'winner' and 'loser' breakdown. We want a breakdown just by the team and who the opponent is. We will have a variable in the future that will tabulate who the winner and loser is later on in the markdown.
+
+```{r}
+colnames(seasonstats.w)
+colnames(tourneystats.w)
+```
+We are changing the names for the 'winner' dataframe. We are changing the W's to just regular 'points' or 'assists'. The opponent will have an 'o' added in front of their statistics. Each team has 14 stats so their are a total of 28 name changes. However, we will be doing this for tourneystats as well. 
+```{r}
+col_names_w = c("Season", "Daynum","Wteam","score","Lteam",
+                "oscore","Wloc","Numot","fgm","fga","fgm3","fga3",
+                "ftm","fta","or","dr","ast","to","stl","blk","pf",
+                "ofgm","ofga","ofgm3","ofga3","oftm","ofta","oor",
+                "odr","oast","oto","ostl","oblk","opf")
+names(seasonstats.w) = col_names_w
+names(tourneystats.w) = col_names_w
+
+col_names_l = c("Season", "Daynum","Wteam","oscore","Lteam",
+                "score","Wloc","Numot","ofgm","ofga","ofgm3","ofga3",
+                "oftm","ofta","oor","odr","oast","oto","ostl","oblk","opf",
+                "fgm","fga","fgm3","fga3","ftm","fta","or",
+                "dr","ast","to","stl","blk","pf")
+names(seasonstats.l) = col_names_l
+names(tourneystats.l) = col_names_l
+```
+
+Starting with the winners stats. We will first create a column called 'teams'. Eventually this + Season is where we will be joining the loser dataframe. We have also created another column called 'scorediff'. We will be using this in our logistic regression. A value in the + means the team won. A value in the - means the team lost. 
+
+We will now duplicate that result for the losers as well. Another addition for seasonstats.l is switching the values for Wloc. Wloc means winners location. Since we want each value to be 'per team', I basically switched the values and made them the opposite of what the 'winners' dataframe has. 
+```{r}
+seasonstats.w$Team = seasonstats.w$Wteam
+seasonstats.w$scorediff = seasonstats.w$score - seasonstats.w$oscore
+
+seasonstats.l$Team = seasonstats.l$Lteam
+seasonstats.l$scorediff = seasonstats.l$score - seasonstats.l$oscore
+seasonstats.l$Wloc = recode(seasonstats.l$Wloc, "'H'= 'A'; 'A' = 'H';else ='N'")
+
+tourneystats.w$Team = tourneystats.w$Wteam
+tourneystats.w$scorediff = tourneystats.w$score - tourneystats.w$oscore
+
+tourneystats.l$Team = tourneystats.l$Lteam
+tourneystats.l$scorediff = tourneystats.l$score - tourneystats.l$oscore
+tourneystats.l$Wloc = recode(tourneystats.l$Wloc,  "'H'= 'A'; 'A' = 'H';else ='N'")
+```
+
+Now that we have the variables we need. We will do a merge to basically 'double the rows'. Notice based on our 'dim' function our column values increase by 2 because of the variables we have feature engineered and our rows basically multiply by 2. A final check is the number of 'scorediff' that is less than 0 and greater than 0 are equal. This means our merge was a success as we have the losers and the winners put in together. 
+
+
+```{r}
+seasonstats.clean = merge(seasonstats.l, seasonstats.w, all.x = TRUE, all.y = TRUE)
+dim(seasonstats)
+dim(seasonstats.clean)
+sum(seasonstats.clean$scorediff < 0)
+sum(seasonstats.clean$scorediff > 0)
+```
+Doing the same with tourney
+
+```{r}
+tourneystats.clean = merge(tourneystats.l, tourneystats.w, all.x = TRUE, all.y = TRUE)
+dim(tourneystats)
+dim(tourneystats.clean)
+sum(tourneystats.clean$scorediff < 0)
+sum(tourneystats.clean$scorediff > 0)
+```
+We will be including tourney stats in this model to help make the winner prediction.  
+
+```{r}
+df = merge(seasonstats.clean, tourneystats.clean, all.x = TRUE, all.y = TRUE)
+dim(df)
+```
+
+Tourney seed was merged here. After a first pass at the analysis, tourney seed did not help any impact in this dataframe. It has been removed. 
+
+We have added a dependent variable named outcome that is between 0 and 1 and is dependent on scorediff. 
+```{r}
+df$outcome <- ifelse(df$scorediff>0, 1, 0)
+head(df[df$Team == 1328, ])
+```
+
+
+
+As you can see above, there are alot of high correlations. We are going to need to remove some of them that aren't important or took too long for R to use. See below for which was removed
+1. Season - better for a time series
+2. Daynum - better for a time series
+3. Wteam - removed because logistic regression and KNN could not handle running this as a factor without taking a long time. 
+4. Lteam - removed because logistic regression and KNN could not handle running this as a factor without taking a long time.
+5. score - Our dependent variable is heavily correlated with score. After our first pass of the analysis, this variable was attributed to the biggest reason a team won. We did not feel this added much to our analysis and removed it. 
+5. oscore - Our dependent variable is heavily correlated with score. After our first pass of the analysis, this variable was attributed to the biggest reason a team won. We did not feel this added much to our analysis and removed it.
+6. Numot - rated really low during our initial analysis. removed for that reason
+7. team - removed because logistic regression and KNN could not handle running this as a factor without taking a long time.
+
+### Step 2: Exploratory analysis
+```{r}
+df = subset(df, select = -c(Season,Daynum, Wteam, Lteam, score, oscore, Numot, Team))
+```
+New corrplot to examine any high colinearity. The biggest ones are pf (personal foul) with ftm/oftm and fta/ofta which are free throws made and attempted by the team and the opponent. 
+
+
+```{r}
+temp <- c("ofgm", "ofga", "ofgm3", "ofga3", "oftm", "ofta", "oor", "odr", "oast", "oto", "ostl", "oblk", "opf", "fgm", "fga", "fgm3", "fga3", "ftm", "fta", "or", "dr", "ast", "to", "stl", "blk", "pf")
+df2 = df[temp]
+df2[] <- lapply(df2, function(x) {
+    if(is.factor(x)) as.numeric(as.character(x)) else x
+})
+sapply(df2, class)
+corr <- round(cor(df2), 1)
+ggcorrplot(corr, hc.order = TRUE, lab = TRUE, lab_size = 2.5, type = "lower")
+```
+Converting our dependent variable to a factor
+
+```{r}
+df$outcome = factor(df$outcome)
+```
+
+
+
+```{r}
+completedataset = merge(seasonstats.clean, tourneystats.clean, all.x = TRUE, all.y = TRUE)
+dim(completedataset)
+
+completedataset.clean = merge(completedataset, tourneyseeds, by = c("Season", "Team"), all.x = TRUE)
+
+sum(is.na(completedataset.clean))
+
+completedataset.clean.noNAs = na.omit(completedataset.clean)
+dim(completedataset.clean.noNAs)
+```
+
+
+
+
+```{r}
+
+completedataset.clean$outcome.1 = ifelse(completedataset.clean$scorediff>0, "W", "L")
+ggplot(data = completedataset.clean, aes(x = outcome.1, y = score, colour = factor(Season))) + 
+  geom_boxplot(mapping = aes(x = outcome.1, y = score))
+  geom_jitter()
+
+```
+It seems that for winners, they tend to on average earn 10 more scores than the losing teams. Also, the scores average per year are roughly the same with a bit increase in recent years. 
+
+```{r}
+temp = completedataset.clean
+temp = temp %>% 
+        mutate(scorediff_quant = as.character(ntile(scorediff, 4)))
+
+
+d =  ggplot(temp, aes(x = fgm, fill = scorediff_quant))
+d + geom_density(aes(fill = scorediff_quant), alpha = 0.3)
+
+```
+From color 1-4 they represent teams with different number of winning field goals made. The larger the score difference, the more field goals made. 
+
+
+### Step 3: Variable selections
+##### backword and forward variable analysis
+
+Our initial analysis with logistic regression kept returning this error: glm.fit: algorithm did not convergeglm.fit: fitted probabilities numerically 0 or 1 occurred - after a brief search online and looking at our coefficients, it was determined our data was overfitting. We thought it would be best to do a quick regression on scorediff (variable highly like our dependent variable) to see if we can determine which one of our variables were most important.
+
+We used the recommendation of stopping at 15
+```{r}
+regfit.bwd = regsubsets(scorediff~. - outcome, data = df, nvmax = 29, method = "backward")
+regfit.fwd = regsubsets(scorediff~. - outcome, data = df, nvmax = 29 ,method = "forward")
+summary(regfit.bwd)
+summary(regfit.fwd)
+```
+These graphs were helpful. Basically, anything attributed to scoring more points (ftm, fgm, fgm3) were the most important variables. Based on this, location of the game, ofga3, ofta, oor, odr, opf, fga, fga3, fta, dr, ast, stl, and pf are not that important. However they might be worth keeping. 
+```{r}
+
+coef(regfit.bwd, 15)
+coef(regfit.fwd, 15)
+
+```
+##### Variable selections with lasso regression
+
+```{r}
+set.seed(19910401)
+inTrain = createDataPartition(df$outcome, p = 0.75, list = FALSE)
+dfTrain = df[inTrain,]
+dfTest = df[-inTrain,]
+```
+
+Creating x and y
+
+```{r}
+x = model.matrix(outcome~. - scorediff, dfTrain)[, -1]
+y = dfTrain$outcome
+xval = model.matrix(outcome~. - scorediff, dfTest)[, -1]
+yval = dfTest$outcome
+```
+
+Running lasso
+
+```{r}
+lassotrain = glmnet(x, y, family = "binomial", alpha = 1, lambda = NULL)
+```
+
+plotting the lasso
+
+```{r}
+plot(lassotrain)
+
+```
+
+using cross validation for lasso. This could take up to 10 minutes but will help us in the long run
+
+```{r, cache = TRUE}
+set.seed(956)
+crossval = cv.glmnet(x, y, family = "binomial", alpha =1)
+```
+
+Now confirming which variables are best. 
+
+```{r}
+bestlam = crossval$lambda.min
+out = glmnet(xval, yval, family = "binomial", alpha = 1)
+lasso.coef = predict(out, type = "coefficients", s = bestlam)[1:29,]
+lasso.coef
+```
+From what we can see above, WlocH, WlocN, ofga, ofga3, oor, oto, oblk, fga3, or, ast, stl, and blk are at 0. ofta, odr, oast, ostl, opf, fga fta, dr, to, and pf are close to 0 This means 21 of our variables should not be included. The only ones that matter are: ofgm, ofgm3, oftm, fgm, fgm3, and ftm. All these variables are attributed to scoring parameters. 
+
+These variables are also the 6 best variables based on the forward and backword regression models. Which makes sense, scoring more than ones opponent does make one the winner. 
+
+
+### step 4: Model fits
+##### creating a training and testing dataset
+
+```{r}
+set.seed(19910401)
+inTrain = createDataPartition(df$outcome, p = 0.75, list = FALSE)
+dfTrain = df[inTrain,]
+dfTest = df[-inTrain,]
+```
+
+##### Logistic regression with all variables
+We tried with several type of glm models with different variables. Some of them work, some of them don't. Below are all of the results
+
+```{r}
+glm.fits = glm(outcome ~. - scorediff, data = dfTrain, family = binomial)
+```
+
+If all variables are included, the data is overfit. However, our recall and precision are perfect if all variables are used. In my opinion, this is not the best model to use. 
+
+```{r}
+summary(glm.fits)
+```
+
+```{r}
+outcome.test = dfTest$outcome
+```
+
+
+```{r}
+glm.probs = predict(glm.fits, dfTest, type = "response")
+glm.probs = ifelse(glm.probs > .5, 1, 0)
+glm.table = table(glm.probs, outcome.test)
+glm.table
+```
+
+```{r}
+precision(glm.table)
+recall(glm.table)
+mean(glm.probs == outcome.test)
+```
+##### Logistic regression with top 6 variables
+
+```{r}
+glm.fits2 = glm(outcome ~ ofgm + fgm + ftm + oftm + ofgm3 + fgm3, data = dfTrain, family = binomial)
+summary(glm.fits2)
+```
+
+```{r}
+glm.probs2 = predict(glm.fits2, dfTest, type = "response")
+glm.probs2 = ifelse(glm.probs2 > .5, 1, 0)
+glm.table2 = table(glm.probs2, outcome.test)
+glm.table2
+```
+
+```{r}
+precision(glm.table2)
+recall(glm.table2)
+mean(glm.probs2 == outcome.test)
+```
+##### Logistic regression with 3 variables
+As one can see, even the top 6 variables are just too powerful and lead to predicting the model perfectly. We would have to limit our model to ofgm, fgm, and ftm to get a result that is not perfect. 
+```{r}
+glm.fits3 = glm(outcome ~ ofgm + fgm + ftm, data = dfTrain, family = binomial)
+summary(glm.fits3)
+```
+
+```{r}
+glm.probs3 = predict(glm.fits3, dfTest, type = "response")
+glm.probs3 = ifelse(glm.probs3 > .5, 1, 0)
+glm.table3 = table(glm.probs3, outcome.test)
+glm.table3
+```
+
+```{r}
+precision(glm.table3)
+recall(glm.table3)
+mean(glm.probs3 == outcome.test)
+```
+In our opinion, logistic regression did it's job and figured out the best way to figure out who wins a game is to figure out who scores the most. Unfortunately this is a bit underwhelming speaking statistically. We tried running the knn here but it failed to work after 30 minutes. So we stopped and conducted other analyses. 
+
+##### Decision tree
+We will now conduct a decision tree. We wanted to keep all the variables to see how the decision tree would choose it's variables
+
+```{r}
+set.seed(19910401)
+
+bbtree = tree(outcome ~. -scorediff, dfTrain)
+tree.pred = predict(bbtree, dfTest, type = "class")
+treetable = table(tree.pred, outcome.test)
+treetable
+```
+As you can see above, this tree has some error rate. 
+
+```{r}
+precision(treetable)
+recall(treetable)
+```
+The tree doesn't perform as well as logistic regression. The precision and recall aren't as great. 
+
+```{r}
+cv.bbtree = cv.tree(bbtree, FUN = prune.misclass)
+```
+
+Cross validating the tree
+
+```{r}
+cv.bbtree$size[which.min(cv.bbtree$dev)]
+```
+
+The results say a tree size of 8 performs best. 
+
+```{r}
+par(mfrow = c(1,3))
+plot(cv.bbtree)
+plot(cv.bbtree$size, cv.bbtree$dev, type="b", 
+     xlab = "Tree Size", ylab = "Deviance")
+plot(cv.bbtree$k, cv.bbtree$dev, type = "b",
+     xlab = "Alpha", ylab = "Deviance")
+```
+
+Based on the 'tree size' graph above. 6 and 8 tree size perform equally well. 
+
+```{r}
+best_tree_size=8
+
+par(mfrow = c(1,1))
+prune.bb <- prune.misclass(bbtree, best = best_tree_size)
+plot(prune.bb)
+text(prune.bb, pretty=0)
+```
+With 8, we have 2 specific leaves that don't change on either answer
+
+```{r}
+best_tree_size=6
+
+par(mfrow = c(1,1))
+prune.bb <- prune.misclass(bbtree, best = best_tree_size)
+plot(prune.bb)
+text(prune.bb, pretty=0)
+```
+
+Tree size 6 is our best answer. These are also variables that weren't picked up by our variable selection. These make our analysis more interesting but less powerful. 
+
+
+Teams - This dataset will need to be merged as well but is a much lower priority. It basically gives us team names. It will not matter for our predictions as the teams are coded by numbers. We have included it in the Markdown and HTML printout for your confirmation purposes. 
+
+
+Seasons - We are also ignoring this dataset for now. Though we originally included it in our proposal, it adds no impact on our prediction. It basically explains the 'Seed' a bit more. We have included it in the Markdown and HTML printout for your confirmation purposes. 
+
+TourneySlots. Not used 
+
+
+
+## Question 1.2: How do teams win? Analyze with aggregated yearly data
+
+For the following data, each row represents each team each year's performance. Each column represents the average of performance(like field goals made, 3 pointers..) within that year. 
+
+### Step 1: Data cleaning
+##### Extract dataset
+```{r}
+seasonstats  <-read.csv("march-machine-learning-mania-2016-v2/RegularSeasonDetailedResults.csv")
+tourneystats <-read.csv("march-machine-learning-mania-2016-v2/TourneyDetailedResults.csv")
+teams <- read.csv('march-machine-learning-mania-2016-v2/Teams.csv')
+
+wreg_detail_0315 <- seasonstats %>%
+  select(Season, Wteam,Lteam, 
+         Wloc,Wscore,Numot, Wfgm,Wfga,Wfgm3, 
+         Wfga3,Wftm,Wfta,Wor,Wdr,Wast, Wto,Wstl, Wblk, Wpf)%>%
+  filter(Season>=2003, Season <=2015)
+  
+lreg_detail_0315 <- seasonstats %>%
+  select(Season, Wteam,Lteam, 
+         Wloc,Lscore,Numot, Lfgm,Lfga,Lfgm3, 
+         Lfga3,Lftm,Lfta,Lor,Ldr,Last, Lto,Lstl, Lblk, Lpf)%>%
+  filter(Season>=2003, Season <=2015)  
+
+```
+
+
+##### Extract winner record
+```{r}
+
+win_record <- function(data){
+  winrecord = rbind()
+  for (i in unique(data$Season)){
+    yearly_data <-  data %>%
+      filter(Season == i)
+    for (team in teams$Team_Id) {
+      num_wins <- length(which(yearly_data$Wteam == team))
+      num_lose <- length(which(yearly_data$Lteam == team))
+      win_rate <- num_wins / (num_wins+num_lose)
+  
+  
+      details <- yearly_data[which(
+        yearly_data$Wteam == team),]
+  
+  #get details about location when winning
+  h.win <- length(which(details$Wloc == "H"))
+  a.win <- length(which(details$Wloc == "A"))
+  n.win <- length(which(details$Wloc == "N"))
+  
+  #get the statistics of winning games
+  stats <- transpose(as.data.frame(colMeans(details[,5:19])))
+  
+  #put them together
+  single_team <-  cbind(team, i, num_wins, num_lose, win_rate,h.win, a.win,n.win,stats)
+  
+  winrecord <- rbind(winrecord,single_team)
+      
+      
+    }
+  }
+  names(winrecord) <-c('team','year','num_wins','num_lose',
+                       'win_rate','h.win','a.win','n.win',
+                       names(wreg_detail_0315)[5:19])
+  return(winrecord)
+}
+
+```
+
+##### Extract lose record
+```{r}
+lose_record <- function(data){
+  loserecord = rbind()
+  for (i in unique(data$Season)){
+    yearly_data <-  data %>%
+      filter(Season == i)
+    for (team in teams$Team_Id) {
+      num_wins <- length(which(yearly_data$Wteam == team))
+      num_lose <- length(which(yearly_data$Lteam == team))
+      lose_rate <- num_lose / (num_wins+num_lose)
+  
+  
+      details <- yearly_data[which(
+        yearly_data$Lteam == team),]
+  
+  #get details about location when winning
+  h.win <- length(which(details$Wloc == "A"))
+  a.win <- length(which(details$Wloc == "H"))
+  n.win <- length(which(details$Wloc == "N"))
+  
+  #get the statistics of winning games
+  stats <- transpose(as.data.frame(colMeans(details[,5:19])))
+  
+  #put them together
+  single_team <-  cbind(team, i, num_wins, num_lose, lose_rate,h.win, a.win,n.win,stats)
+  
+  loserecord <- rbind(loserecord,single_team)
+      
+      
+    }
+  }
+  names(loserecord) <-c('team','year','num_wins','num_lose',
+                       'lose_rate','h.win','a.win','n.win',
+                       names(lreg_detail_0315)[5:19])
+  return(loserecord)
+}
+
+```
+
+
+##### Apply to all data
+```{r}
+
+reg_winrecord   <-  win_record(wreg_detail_0315)
+reg_loserecord  <- lose_record(lreg_detail_0315)
+
+
+```
+
+##### Deal with NAs
+```{r}
+reg_winrecord <- na.omit(reg_winrecord)
+reg_loserecord <- na.omit(reg_loserecord)
+head(reg_winrecord)
+```
+
+
+
+### step 2: Model fits
+##### Random forests
+```{r}
+# Define training set
+set.seed(1)
+reg_winrecord.1 = reg_winrecord
+reg_winrecord.1$n.win = NULL
+reg_winrecord.1$year = NULL
+reg_winrecord.1$a.win = NULL
+reg_winrecord.1$h.win = NULL
+train = sample(1:nrow(reg_winrecord.1), nrow(reg_winrecord.1)/2)
+reg_winrecord.test = reg_winrecord.1$num_wins[-train]
+
+p = round(sqrt(dim(reg_winrecord.1)[2]-1))
+#Importance =  if  importance of predictors should be assessed
+rf.reg_winrecord <- randomForest(num_wins~. -num_lose-win_rate ,
+                             reg_winrecord.1,
+                             subset=train, 
+                             mtry=p, 
+                             importance=TRUE)
+
+# MSE
+yhat.rf = predict(rf.reg_winrecord, newdata = reg_winrecord.1[-train,])
+mean((yhat.rf - reg_winrecord.test)^2)
+```
+
+```{r}
+importance(rf.reg_winrecord)
+```
+
+```{r}
+varImpPlot(rf.reg_winrecord)
+```
+Based on the yearly aggregate data, turnover seems to be the most important variable in determining number of wins
+
+```{r}
+partialPlot(rf.reg_winrecord, reg_winrecord.1, x.var = "Wto")
+# for (i in ncol(reg_winrecord.1)){
+#   partialPlot(rf.reg_winrecord, reg_winrecord.1, x.var = colnames(reg_winrecord.1)[i])
+# }
+```
+
+##### boosting
+```{r}
+#boosting
+set.seed(2)
+boost.reg_winrecord = gbm(num_wins~. -num_lose-win_rate, data = reg_winrecord.1[train,], 
+                 distribution = "gaussian",
+                 n.trees = 5000, 
+                 interaction.depth = 6,
+                 shrinkage = 0.2,
+                 verbose = F)
+
+yhat.boost = predict(boost.reg_winrecord, newdata = reg_winrecord.1[-train,], n.trees = 5000)
+mean((yhat.boost - reg_winrecord.test)^2)
+```
+
+
+```{r}
+#CV
+boost.reg_winrecord.cv = gbm(num_wins~. -num_lose-win_rate ,
+                    data = reg_winrecord.1[train,],
+                    distribution = "gaussian",
+                    n.trees = 5000,
+                    interaction.depth = 6,
+                    verbose = F, 
+                    cv.folds = 10)
+
+min(boost.reg_winrecord.cv$cv.error)
+
+qplot(1:5000, boost.reg_winrecord.cv$cv.error, xlab = "Number of trees")
+summary(boost.reg_winrecord.cv)
+```
+
+
+
+
+
+
+## Question 2.1: How do teams earn a seat in playoff season? Analyze with aggregated yearly data
+
+The data is similar to question 1.2 with addtional column: tour playoff(1 means the team entered playoff while 0 means the team didn't)
+
+### Step 1: Data adding
+##### Add a column of tour playoff
+```{r}
+#add a 1 or 0 to the reg_record
+tour <-  c()
+
+for ( year in 2003:2015){
+  
+  reg.season <-  reg_winrecord[which(reg_winrecord$year == year),]
+  team1 <- unique(tourneystats[which(
+    tourneystats$Season == year),]$Wteam)
+  team2 <- unique(tourneystats[which(
+    tourneystats$Season == year),]$Lteam)
+  tour.team <- unique(c(team1, team2))
+  for (team in reg.season$team){
+    if(team %in% tour.team){
+      tour <-  append(tour, 1)
+    }else{
+      tour <-  append(tour,0)
+    }
+  }
+}
+reg_tourrecord <-  cbind(reg_winrecord, tour)
+
+
+```
+
+##### Merge all the record
+```{r}
+#merge the lose and win record
+
+reg_mix <-  merge(reg_tourrecord, reg_loserecord, by = c("team", "year"))
+
+
+reg_mix <- subset(reg_mix, 
+                        select  = -c(team,year, h.win.x,a.win.x, n.win.x, Wscore,
+                                     num_wins.y,num_lose.y, lose_rate, h.win.y, 
+                                     a.win.y, n.win.y, Lscore, Numot.y))
+sub1 <- reg_mix$num_wins.x * reg_mix[,5:17]
+sub2 <- reg_mix$num_lose.x * reg_mix[,19:31]
+
+
+
+reg_merge <- cbind((sub1+sub2)/(reg_mix$num_wins.x+reg_mix$num_lose.x),
+              reg_mix$tour)
+
+
+names(reg_merge) <- c("fgm","fga","fgm3","fga3","ftm","fta","or",
+                      "dr","ast","to","stl","blk","pf","tour")
+
+```
+
+### Step 2: Exploratory analysis
+```{r}
+
+df <-  reg_winrecord %>%
+  select(tour,h.win,win_rate, Wfgm, Wfga, Wfgm3, Wfga3,
+         Wftm, Wfta, Wor, Wdr, Wast, Wto, Wstl, Wblk, Wpf)
+
+corr <-  round(cor(reg_merge), 1)
+ggcorrplot(corr, hc.order = TRUE, lab = TRUE)
+
+
+
+reg_merge <- subset(reg_merge, select = -c(fga, fga3))
+```
+fgm and fga, fga3 and fgm3 has high correlation, so they will be removed. 
+
+```{r}
+ggplot(data = reg_winrecord, aes(x = year, y = Wfgm, colour = factor(year))) + geom_boxplot(mapping = aes(x = year, y = Wfgm))
+  geom_jitter()
+```
+
+```{r}
+temp = reg_winrecord
+temp = temp %>% 
+        mutate(Wfgm_quant = as.character(ntile(Wfgm, 4)))
+
+
+d =  ggplot(temp, aes(x = win_rate, fill = Wfgm_quant))
+d + geom_density(aes(fill = Wfgm_quant), alpha = 0.3)
+```
+From color 1-4 they represent teams with different number of winning field goals made. The stronger the team, the more field goals made,the higher the winning rate. 
+
+### Step 3: Variable selection
+```{r}
+reg.fwd = regsubsets(tour~. , data = reg_merge ,method = "forward")
+
+summary(reg.fwd)
+
+```
+The model above seems to remove fgm3(3 pointers made), fta(free throws attempted), or(offensive rebounds)
+
+### Step 4: Model fits
+
+##### Set train and test
+```{r}
+set.seed(1)
+
+idx <- createDataPartition(reg_merge$fgm,p = 0.75, list = FALSE)
+
+reg.train <- reg_merge[idx,]
+
+reg.test  <- reg_merge[-idx,]
+
+
+reg.train$tour <- as.factor(reg.train$tour)
+reg.test$tour <- as.factor(reg.test$tour) 
+
+
+```
+
+##### KNN model
+```{r}
+#train model
+knn_model <-  train(tour~., data = reg.train, 
+                    method = "knn", 
+                    trControl = trainControl(method = "cv",number = 10),
+                    tuneGrid = expand.grid(k = seq(1, 50, by = 1)))
+
+best <- which(rownames(knn_model$results) == rownames(knn_model$bestTune))
+best_result <- knn_model$results[best,]
+
+
+#test model
+preds.knn <-  predict(knn_model, reg.test)
+mean(preds.knn == reg.test$tour)
+```
+
+##### GLM model
+```{r}
+x <- model.matrix(tour~., reg.train)[,-12]
+# Convert the outcome (class) to a numerical variable
+y <- reg.train$tour
+x.test <- model.matrix(tour~., reg.test)[,-12]
+y.test <- reg.test$tour
+
+cv.lasso <- cv.glmnet(x,y, alpha = 1, family = "binomial")
+glm.fits <- glmnet(x, y, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+
+#produce a simpler model
+coef(cv.lasso, cv.lasso$lambda.1se)
+
+preds.glm <- predict(glm.fits,x.test)
+preds.class <-  ifelse(preds.glm > 0.5, 1, 0)
+mean(preds.class == y.test)
+
+
+```
+
+From the simplified model by lasso, fgm(field goals made),ftm(free throw made), dr(defensive rebounds),ast(assists), to(turnovers), blk(blocks) and stl(steals) are selected. This is similar to the forward variable selection method.  
+
+##### Random forests
+```{r}
+
+p = 11
+
+bag.reg <- randomForest(tour~., reg.train, mtry = sqrt(p), 
+                        importance = TRUE)
+
+yhat <- predict(bag.reg, newdata = reg.test)
+mean(yhat == reg.test$tour)
+
+
+varImpPlot(bag.reg)
+```
+Apparently, the glm model works the best! Also, turnover and assists are the most important variables. Now teams should consider improve these two aspects to increase their chance of entering playoff season!
+
+
+
+## Question 3: Unsupervised learning
+
+##### Hierarchical clustering
+
+```{r,cache = TRUE}
+hc.complete <- hclust(dist(reg_merge), method="complete")
+hc.average <- hclust(dist(reg_merge), method="average")
+hc.single <- hclust(dist(reg_merge), method="single")
+par(mfrow=c(1,3))
+plot(hc.complete,main="Complete Linkage", xlab="", sub="", cex=.9)
+plot(hc.average, main="Average Linkage", xlab="", sub="", cex=.9)
+plot(hc.single, main="Single Linkage", xlab="", sub="", cex=.9)
+```
+complete works better
+
+##### Find the best cut
+```{r,cache = TRUE}
+
+fviz_nbclust(reg_merge,hcut, method = 'wss')
+
+
+```
+4 is the best
+
+##### Cut tree
+```{r}
+split <- cutree(hc.complete, 4)
+split.bind <- cbind(reg_merge, split)
+table.display <- cbind()
+
+for (i in 1:4){
+  group <- split.bind[which(split.bind$split == i),]
+  print(i)
+  print(colMeans(group))
+  table.display <- cbind(table.display, colMeans(group))
+}
+
+library(knitr)
+kable(table.display, digits = 3)
+
+```
+Table above shows the average performance within each group. Again, the row 'tour' means whether a team enters playoff season or not. The third group (third column) seems to have most teams enter playoff seasons. They indeed performed much better in field goals made(fgm), defensive rebound(dr) and less personal fouls(pf).
+
+DataSource: https://www.kaggle.com/c/march-machine-learning-mania-2016/rules
+Citation: Daniel Sun(a crazy basketball fan that gave us some suggestions!)
+
+
+
